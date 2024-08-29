@@ -23,3 +23,12 @@ sudo bpftrace trace_full.bt --include /home/path/code/etrace/include/custom.h -f
 
 ./etrace.py -s landlock_add_rule -s getdents64 -s getdents --ppid 3497
 ```
+
+# TODO
+ - Add custom parsers for directories, networking, execve
+ - Add syscall 'groups'
+
+
+# Groups
+https://github.com/strace/strace/blob/master/src/sysent_shorthand_defs.h#L42
+https://github.com/strace/strace/blob/master/src/linux/mips/syscallent-o32.h#L126

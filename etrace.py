@@ -46,14 +46,28 @@ CUSTOM_TYPES = [
     "key_serial_t",
     "qid_t",
     "aio_context_t",
-    # "sigset_t",
     "rwf_t",
-    # "siginfo_t",
-    # "stack_t",
     "cap_user_header_t",
     "cap_user_data_t",
     "enum landlock_rule_type",
 ]
+
+SYSCALL_GROUPS = {
+    "process": [
+        "exit",
+        "fork",
+        "execve",
+        "kill",
+        "wait4",
+        "clone",
+        "rt_sigqueueinfo",
+        "tkill",
+        "tgkill",
+        "waitid",
+        "execveat",
+        "exit_group",
+    ]
+}
 
 
 def generate_func(
@@ -214,7 +228,7 @@ def run_bpftrace(header_file: Path, script_file: Path, output_json: bool):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     for line in iter(proc.stdout.readline, b""):
         if output_json:
-            j = json.loads(line.decode())
+            j = json.loads(line.decode("utf-8", "ignore"))
             if j["type"] == "attached_probes":
                 probe_count = j["data"]["probes"]
                 print(f"Started {probe_count} probes", file=sys.stderr)
@@ -230,17 +244,24 @@ def run_bpftrace(header_file: Path, script_file: Path, output_json: bool):
                     dataj[ds[0]] = ":".join(ds[1:])
                 print(json.dumps(dataj))
         else:
-            print(line.decode(), end="")
+            print(line.decode("utf-8", "ignore"), end="")
 
 
 def main():
     """main"""
     parser = argparse.ArgumentParser("eTrace - strace-like logging using bpftrace")
-    parser.add_argument(
+    syscall_group = parser.add_mutually_exclusive_group()
+    syscall_group.add_argument(
         "--syscall",
         "-s",
         action="append",
         help="Only log these specific syscalls",
+    )
+    syscall_group.add_argument(
+        "--group",
+        "-g",
+        choices=SYSCALL_GROUPS.keys(),
+        help="strac-elike syscall Group (see readme)",
     )
     parser.add_argument("--comm", "-c", help="Only log proceses with this name")
     parser.add_argument("--pid", "-p", type=int, help="Only log events from this pid")
@@ -251,7 +272,13 @@ def main():
     args = parser.parse_args()
     if not Path("/sys/kernel/debug/tracing/events/syscalls").exists():
         raise SystemError("Mssing debugfs")
-    header, script = generate_script(args.syscall, args.comm, args.pid, args.ppid)
+
+    if args.group is not None:
+        syscalls = SYSCALL_GROUPS[args.group]
+    else:
+        syscalls = args.syscall
+
+    header, script = generate_script(syscalls, args.comm, args.pid, args.ppid)
     with tempfile.TemporaryDirectory() as tmpdir:
         header_file = Path(tmpdir, "custom.h").resolve()
         script_file = Path(tmpdir, "trace.bt").resolve()
