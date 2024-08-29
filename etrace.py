@@ -5,11 +5,15 @@ eTrace
 
 import os
 import sys
+import json
 import shutil
 import argparse
 import tempfile
+import subprocess
 from pathlib import Path
 from typing import Optional, List
+
+from custom_handlers import TEMPLATE, HANDLERS
 
 INT_TYPES = [
     "__kernel_old_time_t",
@@ -42,20 +46,14 @@ CUSTOM_TYPES = [
     "key_serial_t",
     "qid_t",
     "aio_context_t",
-    "sigset_t",
+    # "sigset_t",
     "rwf_t",
-    "siginfo_t",
-    "stack_t",
+    # "siginfo_t",
+    # "stack_t",
     "cap_user_header_t",
     "cap_user_data_t",
     "enum landlock_rule_type",
 ]
-
-TEMPLATE = """
-tracepoint:syscalls:{name} {{
-{code}
-}}
-"""
 
 
 def generate_func(
@@ -76,6 +74,8 @@ def generate_func(
     Returns:
         str: Script to run with bpftrace
     """
+    if syscall in HANDLERS:
+        return HANDLERS[syscall](comm, pid, ppid)
     sysdir = Path(f"/sys/kernel/debug/tracing/events/syscalls/sys_enter_{syscall}")
     with open(sysdir / "format", "r", encoding="utf-8") as f:
         text = f.read()
@@ -133,9 +133,11 @@ def generate_func(
     if comm is not None:
         code.append(f'  if (comm != "{comm}") {{ return }}')
     if pid is not None:
-        code.append(f'  if (pid != "{pid}") {{ return }}')
+        code.append(f"  if (pid != {pid}) {{ return }}")
     if ppid is not None:
-        code.append(f"  if (curtask->parent->pid != {ppid}) {{ return }}")
+        code.append(
+            f"  if (pid != {ppid} && curtask->parent->pid != {ppid}) {{ return }}"
+        )
 
     code.append(f'  printf("{syscall}\\t{format_string}\\n", {format_args});')
 
@@ -185,6 +187,52 @@ def generate_script(
     return header, output
 
 
+def run_bpftrace(header_file: Path, script_file: Path, output_json: bool):
+    """
+    Start and run bpftrace
+    """
+    # Try to find bpftrace
+    path = ":".join(
+        [
+            os.environ["PATH"],
+            str(Path(__file__).parent.resolve()),
+            os.getcwd(),
+        ]
+    )
+    bpftrace = shutil.which("bpftrace", path=path)
+    if bpftrace is None:
+        raise SystemError(
+            (
+                f"Need bpftrace on the PATH, in the {__file__} "
+                "script root, or in the current directory"
+            )
+        )
+
+    cmd = [bpftrace, str(script_file), "--include", str(header_file)]
+    if output_json:
+        cmd += ["-f", "json"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    for line in iter(proc.stdout.readline, b""):
+        if output_json:
+            j = json.loads(line.decode())
+            if j["type"] == "attached_probes":
+                probe_count = j["data"]["probes"]
+                print(f"Started {probe_count} probes", file=sys.stderr)
+            elif j["type"] == "printf":
+                data = j["data"].strip().split("\t")
+                dataj = {
+                    "syscall": data[0],
+                    "comm": data[1].split(":")[-1],
+                    "pid": data[2].split(":")[-1],
+                }
+                for d in data[3:]:
+                    ds = d.split(":")
+                    dataj[ds[0]] = ":".join(ds[1:])
+                print(json.dumps(dataj))
+        else:
+            print(line.decode(), end="")
+
+
 def main():
     """main"""
     parser = argparse.ArgumentParser("eTrace - strace-like logging using bpftrace")
@@ -197,40 +245,25 @@ def main():
     parser.add_argument("--comm", "-c", help="Only log proceses with this name")
     parser.add_argument("--pid", "-p", type=int, help="Only log events from this pid")
     parser.add_argument(
-        "--ppid", "-pp", type=int, help="Only log events from this parent pid"
+        "--ppid", "-pp", type=int, help="Only log events from this pid or its children"
     )
+    parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
     args = parser.parse_args()
     if not Path("/sys/kernel/debug/tracing/events/syscalls").exists():
         raise SystemError("Mssing debugfs")
     header, script = generate_script(args.syscall, args.comm, args.pid, args.ppid)
-    print(script)
     with tempfile.TemporaryDirectory() as tmpdir:
         header_file = Path(tmpdir, "custom.h").resolve()
         script_file = Path(tmpdir, "trace.bt").resolve()
-
-        # Try to find bpftrace
-        path = ":".join(
-            [
-                os.environ["PATH"],
-                str(Path(__file__).parent.resolve()),
-                os.getcwd(),
-            ]
-        )
-        bpftrace = shutil.which("bpftrace", path=path)
-        if bpftrace is None:
-            raise SystemError(
-                (
-                    f"Need bpftrace on the PATH, in the {__file__} "
-                    "script root, or in the current directory"
-                )
-            )
 
         with open(header_file, "w", encoding="utf-8") as f:
             f.write(header)
         with open(script_file, "w", encoding="utf-8") as f:
             f.write(script)
-        cmd = f"{bpftrace} {script_file} --include {header_file}"
-        os.system(cmd)
+        try:
+            run_bpftrace(header_file, script_file, args.json)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

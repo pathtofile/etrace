@@ -1,3 +1,4 @@
+*.pyc
 *.bt
 custom.h
 log.txt
