@@ -17,3 +17,8 @@ format:
 
 print fmt: "filename: 0x%08lx, argv: 0x%08lx, envp: 0x%08lx", ((unsigned long)(REC->filename)), ((unsigned long)(REC->argv)), ((unsigned long)(REC->envp))
 ```
+
+
+```
+sudo bpftrace trace_full.bt --include /home/path/code/etrace/include/custom.h -f json
+```

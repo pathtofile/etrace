@@ -5,48 +5,50 @@ eTrace
 
 import os
 import sys
+import shutil
 import argparse
-from typing import Optional, List
+import tempfile
 from pathlib import Path
+from typing import Optional, List
 
 INT_TYPES = [
-    "size_t",
+    "__kernel_old_time_t",
+    "__s32",
+    "__u32",
+    "__u64",
     "aio_context_t",
-    "aio_context_t *",
     "enum landlock_rule_type",
     "gid_t",
-    "gid_t *",
     "int",
-    "int *",
-    "__kernel_old_time_t *",
     "key_serial_t",
     "key_t",
     "loff_t",
-    "loff_t *",
     "long",
-    "long *",
     "mqd_t",
     "off_t",
     "pid_t",
     "qid_t",
     "rwf_t",
-    "__s32",
     "size_t",
-    "size_t *",
     "timer_t",
-    "timer_t *",
-    "__u32",
     "u32",
-    "u32 *",
-    "__u64",
     "uid_t",
-    "uid_t *",
     "umode_t",
 ]
-
 STR_TYPES = ["char *"]
-JOIN_TYPES = [
-    "char **",
+
+CUSTOM_TYPES = [
+    "operator_t",
+    "key_serial_t",
+    "qid_t",
+    "aio_context_t",
+    "sigset_t",
+    "rwf_t",
+    "siginfo_t",
+    "stack_t",
+    "cap_user_header_t",
+    "cap_user_data_t",
+    "enum landlock_rule_type",
 ]
 
 TEMPLATE = """
@@ -61,7 +63,7 @@ def generate_func(
     comm: Optional[str],
     pid: Optional[int],
     ppid: Optional[int],
-) -> str:
+) -> tuple[List[str], str]:
     """
     Generate a single bpftrace function
 
@@ -81,6 +83,8 @@ def generate_func(
     arg_names = ["comm", "pid"]
     arg_fmts = ["%s", "%d"]
     arg_accesses = ["comm", "pid"]
+    header_lines = []
+
     started = False
     lines = text.split("\n")
     for l in lines:
@@ -98,19 +102,24 @@ def generate_func(
         arg_type = (
             " ".join(arg_split[:-1]).replace("const ", "").replace("unsigned ", "")
         )
-        if arg_type in INT_TYPES:
+        arg_type_core = arg_type.replace("*", "").strip()
+        if arg_type_core in INT_TYPES:
             arg_access = f"args->{arg_name}"
             arg_fmt = "%d"
         elif arg_type in STR_TYPES:
             arg_access = f"str(args->{arg_name})"
             arg_fmt = "%s"
-        elif arg_type in JOIN_TYPES:
-            arg_access = f"join(args->{arg_name})"
-            arg_fmt = "%s"
         else:
             arg_access = f"args->{arg_name}"
             arg_fmt = "%p"
 
+        if arg_type_core in CUSTOM_TYPES and arg_type_core not in header_lines:
+            if "enum" in arg_type_core:
+                header_lines.append(f"{arg_type_core} {{ IGNORED }};")
+            else:
+                header_lines.append(f"typedef void *{arg_type_core};")
+
+        # print(f"  {arg_type} {arg_name}", file=sys.stderr)
         arg_names.append(arg_name)
         arg_fmts.append(arg_fmt)
         arg_accesses.append(arg_access)
@@ -123,11 +132,15 @@ def generate_func(
     code = []
     if comm is not None:
         code.append(f'  if (comm != "{comm}") {{ return }}')
+    if pid is not None:
+        code.append(f'  if (pid != "{pid}") {{ return }}')
+    if ppid is not None:
+        code.append(f"  if (curtask->parent->pid != {ppid}) {{ return }}")
 
     code.append(f'  printf("{syscall}\\t{format_string}\\n", {format_args});')
 
     output = TEMPLATE.format(name=sysdir.name, code="\n".join(code)).strip()
-    return output
+    return header_lines, output
 
 
 def generate_script(
@@ -135,7 +148,7 @@ def generate_script(
     comm: Optional[str],
     pid: Optional[int],
     ppid: Optional[int],
-) -> str:
+) -> tuple[str, str]:
     """
     Generate bpftrace Script
 
@@ -154,18 +167,32 @@ def generate_script(
         for sysdir in syscall_dir.glob("sys_enter_*"):
             syscalls.append(sysdir.name.replace("sys_enter_", ""))
 
-    output = []
+    header_lines = [
+        "#pragma once",
+        "#include <linux/sched.h>",
+    ]
+    func_lines = []
     for syscall in syscalls:
-        print(syscall, file=sys.stderr)
-        output.append(generate_func(syscall, comm, pid, ppid))
-    return "\n".join(output)
+        # print(syscall, file=sys.stderr)
+        func_header_lines, func_text = generate_func(syscall, comm, pid, ppid)
+        func_lines.append(func_text)
+        for header_line in func_header_lines:
+            if header_line not in header_lines:
+                header_lines.append(header_line)
+
+    header = "\n".join(header_lines) + "\n"
+    output = "\n\n".join(func_lines) + "\n"
+    return header, output
 
 
 def main():
     """main"""
     parser = argparse.ArgumentParser("eTrace - strace-like logging using bpftrace")
     parser.add_argument(
-        "--syscall", "-s", nargs="*", help="Only log these specific syscalls"
+        "--syscall",
+        "-s",
+        action="append",
+        help="Only log these specific syscalls",
     )
     parser.add_argument("--comm", "-c", help="Only log proceses with this name")
     parser.add_argument("--pid", "-p", type=int, help="Only log events from this pid")
@@ -175,12 +202,39 @@ def main():
     args = parser.parse_args()
     if not Path("/sys/kernel/debug/tracing/events/syscalls").exists():
         raise SystemError("Mssing debugfs")
-    script = generate_script(args.syscall, args.comm, args.pid, args.ppid)
+    header, script = generate_script(args.syscall, args.comm, args.pid, args.ppid)
     print(script)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        header_file = Path(tmpdir, "custom.h").resolve()
+        script_file = Path(tmpdir, "trace.bt").resolve()
+
+        # Try to find bpftrace
+        path = ":".join(
+            [
+                os.environ["PATH"],
+                str(Path(__file__).parent.resolve()),
+                os.getcwd(),
+            ]
+        )
+        bpftrace = shutil.which("bpftrace", path=path)
+        if bpftrace is None:
+            raise SystemError(
+                (
+                    f"Need bpftrace on the PATH, in the {__file__} "
+                    "script root, or in the current directory"
+                )
+            )
+
+        with open(header_file, "w", encoding="utf-8") as f:
+            f.write(header)
+        with open(script_file, "w", encoding="utf-8") as f:
+            f.write(script)
+        cmd = f"{bpftrace} {script_file} --include {header_file}"
+        os.system(cmd)
 
 
 if __name__ == "__main__":
     if os.getuid() != 0:
-        print("Re-Running as root", file=sys.stderr)
+        # print("Re-Running as root", file=sys.stderr)
         sys.exit(os.system(f"sudo {sys.executable} {' '.join(sys.argv)}"))
     main()
