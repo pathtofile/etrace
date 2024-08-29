@@ -1,6 +1,5 @@
 # eTrace
-strace-like logging using bpftrace
-
+strace-like logging using bpftrace and eBPF
 ```
 name: sys_enter_execve
 ID: 729
@@ -26,7 +25,6 @@ sudo bpftrace trace_full.bt --include /home/path/code/etrace/include/custom.h -f
 
 # TODO
  - Add custom parsers for directories, networking, execve
- - Add syscall 'groups'
 
 
 # Groups

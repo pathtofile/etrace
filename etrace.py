@@ -14,60 +14,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from custom_handlers import TEMPLATE, HANDLERS
-
-INT_TYPES = [
-    "__kernel_old_time_t",
-    "__s32",
-    "__u32",
-    "__u64",
-    "aio_context_t",
-    "enum landlock_rule_type",
-    "gid_t",
-    "int",
-    "key_serial_t",
-    "key_t",
-    "loff_t",
-    "long",
-    "mqd_t",
-    "off_t",
-    "pid_t",
-    "qid_t",
-    "rwf_t",
-    "size_t",
-    "timer_t",
-    "u32",
-    "uid_t",
-    "umode_t",
-]
-STR_TYPES = ["char *"]
-
-CUSTOM_TYPES = [
-    "operator_t",
-    "key_serial_t",
-    "qid_t",
-    "aio_context_t",
-    "rwf_t",
-    "cap_user_header_t",
-    "cap_user_data_t",
-    "enum landlock_rule_type",
-]
-
-SYSCALL_GROUPS = {
-    "process": [
-        "exit",
-        "fork",
-        "execve",
-        "kill",
-        "wait4",
-        "clone",
-        "rt_sigqueueinfo",
-        "tkill",
-        "tgkill",
-        "waitid",
-        "execveat",
-        "exit_group",
-    ]
-}
+from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, SYSCALL_GROUPS
 
 
 def generate_func(
@@ -91,6 +38,9 @@ def generate_func(
     if syscall in HANDLERS:
         return HANDLERS[syscall](comm, pid, ppid)
     sysdir = Path(f"/sys/kernel/debug/tracing/events/syscalls/sys_enter_{syscall}")
+    if not sysdir.exists():
+        print(f"[**] syscall {syscall} doesn't exist on this platform")
+        return [], ""
     with open(sysdir / "format", "r", encoding="utf-8") as f:
         text = f.read()
     # Arguments come after '__syscall_nr' line
@@ -177,7 +127,7 @@ def generate_script(
     Returns:
         str: Script to run with bpftrace
     """
-    if syscalls is None:
+    if syscalls is None or len(syscalls) == 0:
         syscalls = []
         syscall_dir = Path("/sys/kernel/debug/tracing/events/syscalls")
         for sysdir in syscall_dir.glob("sys_enter_*"):
@@ -191,10 +141,11 @@ def generate_script(
     for syscall in syscalls:
         # print(syscall, file=sys.stderr)
         func_header_lines, func_text = generate_func(syscall, comm, pid, ppid)
-        func_lines.append(func_text)
-        for header_line in func_header_lines:
-            if header_line not in header_lines:
-                header_lines.append(header_line)
+        if func_text != "":
+            func_lines.append(func_text)
+            for header_line in func_header_lines:
+                if header_line not in header_lines:
+                    header_lines.append(header_line)
 
     header = "\n".join(header_lines) + "\n"
     output = "\n\n".join(func_lines) + "\n"
@@ -249,19 +200,21 @@ def run_bpftrace(header_file: Path, script_file: Path, output_json: bool):
 
 def main():
     """main"""
-    parser = argparse.ArgumentParser("eTrace - strace-like logging using bpftrace")
-    syscall_group = parser.add_mutually_exclusive_group()
-    syscall_group.add_argument(
+    parser = argparse.ArgumentParser(
+        "eTrace - strace-like logging using bpftrace and eBPF"
+    )
+    parser.add_argument(
         "--syscall",
         "-s",
         action="append",
         help="Only log these specific syscalls",
     )
-    syscall_group.add_argument(
+    parser.add_argument(
         "--group",
         "-g",
         choices=SYSCALL_GROUPS.keys(),
-        help="strac-elike syscall Group (see readme)",
+        action="append",
+        help="strac-elike syscall group (see readme)",
     )
     parser.add_argument("--comm", "-c", help="Only log proceses with this name")
     parser.add_argument("--pid", "-p", type=int, help="Only log events from this pid")
@@ -273,10 +226,13 @@ def main():
     if not Path("/sys/kernel/debug/tracing/events/syscalls").exists():
         raise SystemError("Mssing debugfs")
 
+    syscalls = []
     if args.group is not None:
-        syscalls = SYSCALL_GROUPS[args.group]
-    else:
-        syscalls = args.syscall
+        for group in args.group:
+            syscalls += SYSCALL_GROUPS[group]
+    if args.syscall is not None:
+        for syscall in args.syscall:
+            syscalls += syscall
 
     header, script = generate_script(syscalls, args.comm, args.pid, args.ppid)
     with tempfile.TemporaryDirectory() as tmpdir:
