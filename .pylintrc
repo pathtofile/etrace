@@ -1,1 +1,5 @@
+[MESSAGES CONTROL]
+disable=global-statement
+
+[FORMAT]
 max-line-length=120

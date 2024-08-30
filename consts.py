@@ -58,6 +58,7 @@ SYSCALL_GROUPS = {
         "waitid",
         "rt_tgsigqueueinfo",
         "execveat",
+        "sched_process_exec",
     ],
     "capture-on-enter": ["exit", "execve", "exit_group", "execveat"],
     "desc": [

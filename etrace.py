@@ -21,6 +21,7 @@ from rich.console import Console
 from custom_handlers import TEMPLATE, HANDLERS
 from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, SYSCALL_GROUPS
 
+# pylint: disable-next=invalid-name
 logger = None
 
 
@@ -38,11 +39,14 @@ def setup_logging(verbose: bool, output_file: Optional[str]):
             self.level = level
             self.negate = negate
 
-        def filter(self, logRecord):
+        def filter(self, record):
+            """
+            Filter record by level
+            """
             if self.negate:
-                return logRecord.levelno != self.level
+                return record.levelno != self.level
             else:
-                return logRecord.levelno == self.level
+                return record.levelno == self.level
 
     logger = logging.getLogger("etrace")
     logger.setLevel(logging.DEBUG)
@@ -94,8 +98,24 @@ def generate_func(
             - list of lines to add to custom header (to de-dupe with other syscalls)
             - Bpftrace script function to run
     """
+    # Add filtering to the function
+    code = []
+    if comm is not None:
+        code.append(f'  if (comm != "{comm}") {{ return }}')
+    if pid is not None:
+        code.append(f"  if (pid != {pid}) {{ return }}")
+    if ppid is not None:
+        check = " && ".join(
+            [
+                f"pid != {ppid}",
+                f"curtask->parent->pid != {ppid}",
+                f"curtask->parent->parent->pid != {ppid}",
+            ]
+        )
+        code.append(f"  if ({check}) {{ return }}")
+
     if syscall in HANDLERS:
-        return HANDLERS[syscall](comm, pid, ppid)
+        return HANDLERS[syscall](code)
     sysdir = Path(f"/sys/kernel/debug/tracing/events/syscalls/sys_enter_{syscall}")
     if not sysdir.exists():
         logger.error("Syscall '%s' doesn't exist on this platform", syscall)
@@ -154,15 +174,6 @@ def generate_func(
         format_string += f"{arg_name}:{arg_fmts[i]}\\t"
     format_string = format_string.strip()
     format_args = ", ".join(arg_accesses)
-    code = []
-    if comm is not None:
-        code.append(f'  if (comm != "{comm}") {{ return }}')
-    if pid is not None:
-        code.append(f"  if (pid != {pid}) {{ return }}")
-    if ppid is not None:
-        code.append(
-            f"  if (pid != {ppid} && curtask->parent->pid != {ppid} && curtask->parent->parent->pid != {ppid}) {{ return }}"
-        )
 
     code.append(f'  printf("{syscall}\\t{format_string}\\n", {format_args});')
 
@@ -228,10 +239,11 @@ def log_output_json(proc: subprocess.Popen):
     """
     for line in iter(proc.stdout.readline, b""):
         try:
-            j = json.loads(line.decode("utf-8", "ignore"))
+            line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
+            j = json.loads(line)
             if j["type"] == "attached_probes":
                 probe_count = j["data"]["probes"]
-                logger.debug(f"Started {probe_count} probes")
+                logger.debug("Started %s probes", probe_count)
             elif j["type"] == "printf":
                 # Build JSON with arguments as keys
                 data = j["data"].strip().split("\t")
@@ -262,10 +274,10 @@ def log_output_pretty(proc: subprocess.Popen):
         style="dark_orange",
         row_styles=["orange1", "orange3"],
     )
-    table.add_column("syscall", ratio=1)
+    table.add_column("syscall", ratio=2)
     table.add_column("comm", ratio=1)
     table.add_column("pid", ratio=1)
-    table.add_column("args", ratio=20)
+    table.add_column("args", ratio=10)
 
     console = Console()
     with console.capture() as capture:
@@ -274,7 +286,8 @@ def log_output_pretty(proc: subprocess.Popen):
 
     for line in iter(proc.stdout.readline, b""):
         try:
-            data = line.decode("utf-8", "ignore").strip().split("\t")
+            line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
+            data = line.split("\t")
             if len(data) == 1:
                 logger.debug(data[0])
             else:
@@ -302,7 +315,9 @@ def log_output_plain(proc: subprocess.Popen):
     """
     for line in iter(proc.stdout.readline, b""):
         try:
-            logger.info(line.decode("utf-8", "ignore").strip())
+            breakpoint()
+            line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
+            logger.info(line)
         except UnicodeDecodeError as exc:
             logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
             continue
@@ -406,6 +421,8 @@ def main():
         syscalls += args.syscall
 
     header, script = generate_script(syscalls, args.comm, args.pid, args.ppid)
+    if script.strip() == "":
+        raise SystemError("No loggable syscalls found")
     with tempfile.TemporaryDirectory() as tmpdir:
         logger.debug("Using tmpdir %s", tmpdir)
         header_file = Path(tmpdir, "custom.h").resolve()
