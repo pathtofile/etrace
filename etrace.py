@@ -9,6 +9,7 @@ import json
 import shutil
 import argparse
 import tempfile
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional, List
@@ -19,6 +20,59 @@ from rich.console import Console
 
 from custom_handlers import TEMPLATE, HANDLERS
 from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, SYSCALL_GROUPS
+
+logger = None
+
+
+def setup_logging(verbose: bool, output_file: Optional[str]):
+    """Setup logger"""
+    global logger
+
+    class LogFilter(object):
+        """
+        Custom Log filter to only log at either a specfic level
+        Or to NOT log a specfic level
+        """
+
+        def __init__(self, level: int, negate: bool):
+            self.level = level
+            self.negate = negate
+
+        def filter(self, logRecord):
+            if self.negate:
+                return logRecord.levelno != self.level
+            else:
+                return logRecord.levelno == self.level
+
+    logger = logging.getLogger("etrace")
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(message)s")
+
+    # Logging plan:
+    # If INFO, print to console and File
+    # If --vebose and Debug, Warning, or Error (i.e. not INFO) print to stderr
+    # If not vebose, print Warning, or Error (i.e. not INFO) print to stderr
+    hander_stdout = logging.StreamHandler(sys.stdout)
+    hander_stdout.setFormatter(formatter)
+    hander_stdout.setLevel(logging.INFO)
+    hander_stdout.addFilter(LogFilter(logging.INFO, False))
+    logger.addHandler(hander_stdout)
+
+    hander_stderr = logging.StreamHandler(sys.stderr)
+    hander_stderr.setFormatter(formatter)
+    if verbose:
+        hander_stderr.setLevel(logging.DEBUG)
+        hander_stderr.addFilter(LogFilter(logging.INFO, True))
+    else:
+        hander_stderr.setLevel(logging.WARNING)
+    logger.addHandler(hander_stderr)
+
+    if output_file is not None:
+        handler_file = logging.FileHandler(output_file, mode="w")
+        handler_file.setFormatter(formatter)
+        handler_file.setLevel(logging.INFO)
+        handler_file.addFilter(LogFilter(logging.INFO, False))
+        logger.addHandler(handler_file)
 
 
 def generate_func(
@@ -36,14 +90,15 @@ def generate_func(
         pid: Only log events from this pid
         ppid: Only log events from this parent pid
 
-    Returns:
-        str: Script to run with bpftrace
+        (list, str): Touple containing:
+            - list of lines to add to custom header (to de-dupe with other syscalls)
+            - Bpftrace script function to run
     """
     if syscall in HANDLERS:
         return HANDLERS[syscall](comm, pid, ppid)
     sysdir = Path(f"/sys/kernel/debug/tracing/events/syscalls/sys_enter_{syscall}")
     if not sysdir.exists():
-        print(f"[**] syscall {syscall} doesn't exist on this platform")
+        logger.error("Syscall '%s' doesn't exist on this platform", syscall)
         return [], ""
     with open(sysdir / "format", "r", encoding="utf-8") as f:
         text = f.read()
@@ -70,6 +125,9 @@ def generate_func(
         arg_type = (
             " ".join(arg_split[:-1]).replace("const ", "").replace("unsigned ", "")
         )
+        logger.debug("syscall: %s", syscall)
+        logger.debug("    %s %s", arg_type, arg_name)
+
         arg_type_core = arg_type.replace("*", "").strip()
         if arg_type_core in INT_TYPES:
             arg_access = f"args->{arg_name}"
@@ -87,7 +145,6 @@ def generate_func(
             else:
                 header_lines.append(f"typedef void *{arg_type_core};")
 
-        # print(f"  {arg_type} {arg_name}", file=sys.stderr)
         arg_names.append(arg_name)
         arg_fmts.append(arg_fmt)
         arg_accesses.append(arg_access)
@@ -129,13 +186,16 @@ def generate_script(
         ppid: Only log events from this parent pid
 
     Returns:
-        str: Script to run with bpftrace
+        (str, str): Touple containing:
+            - Custom header text to write to c header file
+            - Bpftrace script to run
     """
     if syscalls is None or len(syscalls) == 0:
         syscalls = []
         syscall_dir = Path("/sys/kernel/debug/tracing/events/syscalls")
         for sysdir in syscall_dir.glob("sys_enter_*"):
             syscalls.append(sysdir.name.replace("sys_enter_", ""))
+    logger.debug("Using syscalls: %s", ",".join(syscalls))
 
     header_lines = [
         "#pragma once",
@@ -143,7 +203,6 @@ def generate_script(
     ]
     func_lines = []
     for syscall in syscalls:
-        # print(syscall, file=sys.stderr)
         func_header_lines, func_text = generate_func(syscall, comm, pid, ppid)
         if func_text != "":
             func_lines.append(func_text)
@@ -152,8 +211,12 @@ def generate_script(
                     header_lines.append(header_line)
 
     header = "\n".join(header_lines) + "\n"
-    output = "\n\n".join(func_lines) + "\n"
-    return header, output
+    script = "\n\n".join(func_lines) + "\n"
+    logger.debug("=== c header: ===")
+    logger.debug(header)
+    logger.debug("=== bpftrace script: ===")
+    logger.debug(script)
+    return header, script
 
 
 def log_output_json(proc: subprocess.Popen):
@@ -164,21 +227,26 @@ def log_output_json(proc: subprocess.Popen):
         proc(Popen): bpftrace process
     """
     for line in iter(proc.stdout.readline, b""):
-        j = json.loads(line.decode("utf-8", "ignore"))
-        if j["type"] == "attached_probes":
-            probe_count = j["data"]["probes"]
-            print(f"Started {probe_count} probes", file=sys.stderr)
-        elif j["type"] == "printf":
-            data = j["data"].strip().split("\t")
-            dataj = {
-                "syscall": data[0],
-                "comm": data[1].split(":")[-1],
-                "pid": data[2].split(":")[-1],
-            }
-            for d in data[3:]:
-                ds = d.split(":")
-                dataj[ds[0]] = ":".join(ds[1:])
-            print(json.dumps(dataj))
+        try:
+            j = json.loads(line.decode("utf-8", "ignore"))
+            if j["type"] == "attached_probes":
+                probe_count = j["data"]["probes"]
+                logger.debug(f"Started {probe_count} probes")
+            elif j["type"] == "printf":
+                # Build JSON with arguments as keys
+                data = j["data"].strip().split("\t")
+                dataj = {
+                    "syscall": data[0],
+                    "comm": data[1].split(":")[-1],
+                    "pid": data[2].split(":")[-1],
+                }
+                for d in data[3:]:
+                    ds = d.split(":")
+                    dataj[ds[0]] = ":".join(ds[1:])
+                logger.info(json.dumps(dataj))
+        except (json.decoder.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
+            continue
 
 
 def log_output_pretty(proc: subprocess.Popen):
@@ -200,23 +268,29 @@ def log_output_pretty(proc: subprocess.Popen):
     table.add_column("args", ratio=20)
 
     console = Console()
-    console.print(table)
+    with console.capture() as capture:
+        console.print(table)
+    logger.info(capture.get())
 
     for line in iter(proc.stdout.readline, b""):
-        data = line.decode("utf-8", "ignore").strip().split("\t")
-        if len(data) == 1:
-            print(data[0])
-        else:
-            syscall = data[0]
-            comm = data[1].split(":")[-1]
-            pid = data[2].split(":")[-1]
-            fields = "\t".join(data[3:])
-            table.add_row(syscall, comm, pid, fields)
+        try:
+            data = line.decode("utf-8", "ignore").strip().split("\t")
+            if len(data) == 1:
+                logger.debug(data[0])
+            else:
+                syscall = data[0]
+                comm = data[1].split(":")[-1]
+                pid = data[2].split(":")[-1]
+                fields = "\t".join(data[3:])
+                table.add_row(syscall, comm, pid, fields)
 
-            # Only print newest row of actual data
-            with console.capture() as capture:
-                console.print(table)
-            print(capture.get().splitlines()[-2])
+                # Only print newest row of actual data
+                with console.capture() as capture:
+                    console.print(table)
+                logger.info(capture.get().splitlines()[-2])
+        except UnicodeDecodeError as exc:
+            logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
+            continue
 
 
 def log_output_plain(proc: subprocess.Popen):
@@ -227,7 +301,11 @@ def log_output_plain(proc: subprocess.Popen):
         proc(Popen): bpftrace process
     """
     for line in iter(proc.stdout.readline, b""):
-        print(line.decode("utf-8", "ignore"), end="")
+        try:
+            logger.info(line.decode("utf-8", "ignore").strip())
+        except UnicodeDecodeError as exc:
+            logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
+            continue
 
 
 def run_bpftrace(header_file: Path, script_file: Path, output_format: str):
@@ -259,6 +337,7 @@ def run_bpftrace(header_file: Path, script_file: Path, output_format: str):
     cmd = [bpftrace, str(script_file), "--include", str(header_file)]
     if output_format == "json":
         cmd += ["-f", "json"]
+    logger.debug("Starting bpftrace with: %s", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     if output_format == "json":
         log_output_json(proc)
@@ -302,9 +381,22 @@ def main():
         default="pretty",
         help="Output Format",
     )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Also output to file file",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Verbose logging",
+    )
     args = parser.parse_args()
     if not Path("/sys/kernel/debug/tracing/events/syscalls").exists():
         raise SystemError("Mssing debugfs")
+
+    setup_logging(args.verbose, args.output)
 
     syscalls = []
     if args.group is not None:
@@ -315,6 +407,7 @@ def main():
 
     header, script = generate_script(syscalls, args.comm, args.pid, args.ppid)
     with tempfile.TemporaryDirectory() as tmpdir:
+        logger.debug("Using tmpdir %s", tmpdir)
         header_file = Path(tmpdir, "custom.h").resolve()
         script_file = Path(tmpdir, "trace.bt").resolve()
 
@@ -330,6 +423,6 @@ def main():
 
 if __name__ == "__main__":
     if os.getuid() != 0:
-        # print("Re-Running as root", file=sys.stderr)
+        print("Re-Running as root", file=sys.stderr)
         sys.exit(os.system(f"sudo {sys.executable} {' '.join(sys.argv)}"))
     main()
