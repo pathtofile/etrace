@@ -13,6 +13,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List
 
+from rich import box
+from rich.table import Table
+from rich.console import Console
+
 from custom_handlers import TEMPLATE, HANDLERS
 from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, SYSCALL_GROUPS
 
@@ -100,7 +104,7 @@ def generate_func(
         code.append(f"  if (pid != {pid}) {{ return }}")
     if ppid is not None:
         code.append(
-            f"  if (pid != {ppid} && curtask->parent->pid != {ppid}) {{ return }}"
+            f"  if (pid != {ppid} && curtask->parent->pid != {ppid} && curtask->parent->parent->pid != {ppid}) {{ return }}"
         )
 
     code.append(f'  printf("{syscall}\\t{format_string}\\n", {format_args});')
@@ -152,9 +156,88 @@ def generate_script(
     return header, output
 
 
-def run_bpftrace(header_file: Path, script_file: Path, output_json: bool):
+def log_output_json(proc: subprocess.Popen):
+    """
+    Log output as JSON
+
+    Args:
+        proc(Popen): bpftrace process
+    """
+    for line in iter(proc.stdout.readline, b""):
+        j = json.loads(line.decode("utf-8", "ignore"))
+        if j["type"] == "attached_probes":
+            probe_count = j["data"]["probes"]
+            print(f"Started {probe_count} probes", file=sys.stderr)
+        elif j["type"] == "printf":
+            data = j["data"].strip().split("\t")
+            dataj = {
+                "syscall": data[0],
+                "comm": data[1].split(":")[-1],
+                "pid": data[2].split(":")[-1],
+            }
+            for d in data[3:]:
+                ds = d.split(":")
+                dataj[ds[0]] = ":".join(ds[1:])
+            print(json.dumps(dataj))
+
+
+def log_output_pretty(proc: subprocess.Popen):
+    """
+    Log output to console in a pretty way
+
+    Args:
+        proc(Popen): bpftrace process
+    """
+    table = Table(
+        expand=True,
+        box=box.SIMPLE,
+        style="dark_orange",
+        row_styles=["orange1", "orange3"],
+    )
+    table.add_column("syscall", ratio=1)
+    table.add_column("comm", ratio=1)
+    table.add_column("pid", ratio=1)
+    table.add_column("args", ratio=20)
+
+    console = Console()
+    console.print(table)
+
+    for line in iter(proc.stdout.readline, b""):
+        data = line.decode("utf-8", "ignore").strip().split("\t")
+        if len(data) == 1:
+            print(data[0])
+        else:
+            syscall = data[0]
+            comm = data[1].split(":")[-1]
+            pid = data[2].split(":")[-1]
+            fields = "\t".join(data[3:])
+            table.add_row(syscall, comm, pid, fields)
+
+            # Only print newest row of actual data
+            with console.capture() as capture:
+                console.print(table)
+            print(capture.get().splitlines()[-2])
+
+
+def log_output_plain(proc: subprocess.Popen):
+    """
+    Log output to console in a basic way
+
+    Args:
+        proc(Popen): bpftrace process
+    """
+    for line in iter(proc.stdout.readline, b""):
+        print(line.decode("utf-8", "ignore"), end="")
+
+
+def run_bpftrace(header_file: Path, script_file: Path, output_format: str):
     """
     Start and run bpftrace
+
+    Args:
+        header_file(Path): Path to custom c header file
+        script_file(Path): Path to bpftrace file
+        output_format(str): Output format
     """
     # Try to find bpftrace
     path = ":".join(
@@ -174,28 +257,15 @@ def run_bpftrace(header_file: Path, script_file: Path, output_json: bool):
         )
 
     cmd = [bpftrace, str(script_file), "--include", str(header_file)]
-    if output_json:
+    if output_format == "json":
         cmd += ["-f", "json"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    for line in iter(proc.stdout.readline, b""):
-        if output_json:
-            j = json.loads(line.decode("utf-8", "ignore"))
-            if j["type"] == "attached_probes":
-                probe_count = j["data"]["probes"]
-                print(f"Started {probe_count} probes", file=sys.stderr)
-            elif j["type"] == "printf":
-                data = j["data"].strip().split("\t")
-                dataj = {
-                    "syscall": data[0],
-                    "comm": data[1].split(":")[-1],
-                    "pid": data[2].split(":")[-1],
-                }
-                for d in data[3:]:
-                    ds = d.split(":")
-                    dataj[ds[0]] = ":".join(ds[1:])
-                print(json.dumps(dataj))
-        else:
-            print(line.decode("utf-8", "ignore"), end="")
+    if output_format == "json":
+        log_output_json(proc)
+    if output_format == "pretty":
+        log_output_pretty(proc)
+    else:
+        log_output_plain(proc)
 
 
 def main():
@@ -219,9 +289,19 @@ def main():
     parser.add_argument("--comm", "-c", help="Only log proceses with this name")
     parser.add_argument("--pid", "-p", type=int, help="Only log events from this pid")
     parser.add_argument(
-        "--ppid", "-pp", type=int, help="Only log events from this pid or its children"
+        "--ppid",
+        "-pp",
+        type=int,
+        help="Only log events from this pid, its children, and its grandchildren",
     )
-    parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+    parser.add_argument(
+        "--format",
+        "-f",
+        dest="output_format",
+        choices=["plain", "pretty", "json"],
+        default="pretty",
+        help="Output Format",
+    )
     args = parser.parse_args()
     if not Path("/sys/kernel/debug/tracing/events/syscalls").exists():
         raise SystemError("Mssing debugfs")
@@ -231,8 +311,7 @@ def main():
         for group in args.group:
             syscalls += SYSCALL_GROUPS[group]
     if args.syscall is not None:
-        for syscall in args.syscall:
-            syscalls += syscall
+        syscalls += args.syscall
 
     header, script = generate_script(syscalls, args.comm, args.pid, args.ppid)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -244,7 +323,7 @@ def main():
         with open(script_file, "w", encoding="utf-8") as f:
             f.write(script)
         try:
-            run_bpftrace(header_file, script_file, args.json)
+            run_bpftrace(header_file, script_file, args.output_format)
         except KeyboardInterrupt:
             pass
 

@@ -422,3 +422,12 @@ SYSCALL_GROUPS = {
         "sendmmsg",
     ],
 }
+
+# Add aliases and 'group of groups'
+SYSCALL_GROUPS["proc"] = SYSCALL_GROUPS["process"]
+SYSCALL_GROUPS["net"] = SYSCALL_GROUPS["network"]
+SYSCALL_GROUPS["basic"] = [
+    *SYSCALL_GROUPS["file"],
+    *SYSCALL_GROUPS["network"],
+    *SYSCALL_GROUPS["process"],
+]
