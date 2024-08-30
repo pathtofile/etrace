@@ -270,7 +270,7 @@ def log_output_pretty(proc: subprocess.Popen):
     console = Console()
     with console.capture() as capture:
         console.print(table)
-    logger.info(capture.get())
+    logger.info("\n".join(capture.get().splitlines()[1:-1]))
 
     for line in iter(proc.stdout.readline, b""):
         try:
