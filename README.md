@@ -41,9 +41,13 @@ openat	id	12216	dfd:-100	filename:/lib/x86_64-linux-gnu/libselinux.so.1	flags:52
 ```
 
 # TODO
- - Add custom parsers for directories, networking, execve
+ - Add custom parsers for networking
  - Output logging to file
 
 # Groups
 https://github.com/strace/strace/blob/master/src/sysent_shorthand_defs.h#L42
 https://github.com/strace/strace/blob/master/src/linux/mips/syscallent-o32.h#L126
+
+
+# Credits
+https://mozillazg.com/2024/03/ebpf-tracepoint-syscalls-sys-enter-execve-can-not-get-filename-argv-values-case-en.html

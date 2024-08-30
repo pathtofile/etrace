@@ -1,6 +1,6 @@
 *.pyc
 *.bt
 custom.h
-log.txt
 venv
 test.py
+syscall_info.txt

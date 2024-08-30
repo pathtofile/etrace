@@ -130,6 +130,7 @@ def generate_func(
 
     started = False
     lines = text.split("\n")
+    logger.debug("syscall: %s", syscall)
     for l in lines:
         if "__syscall_nr" in l:
             started = True
@@ -145,7 +146,6 @@ def generate_func(
         arg_type = (
             " ".join(arg_split[:-1]).replace("const ", "").replace("unsigned ", "")
         )
-        logger.debug("syscall: %s", syscall)
         logger.debug("    %s %s", arg_type, arg_name)
 
         arg_type_core = arg_type.replace("*", "").strip()
@@ -210,7 +210,6 @@ def generate_script(
 
     header_lines = [
         "#pragma once",
-        "#include <linux/sched.h>",
     ]
     func_lines = []
     for syscall in syscalls:
@@ -288,8 +287,8 @@ def log_output_pretty(proc: subprocess.Popen):
         try:
             line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
             data = line.split("\t")
-            if len(data) == 1:
-                logger.debug(data[0])
+            if len(data) <= 3:
+                logger.debug("\t".join(data))
             else:
                 syscall = data[0]
                 comm = data[1].split(":")[-1]

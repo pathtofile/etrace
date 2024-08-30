@@ -37,6 +37,8 @@ CUSTOM_TYPES = [
     "cap_user_header_t",
     "cap_user_data_t",
     "enum landlock_rule_type",
+    "sigset_t",
+    "siginfo_t",
 ]
 
 # Mostly copied from strace:
