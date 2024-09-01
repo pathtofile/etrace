@@ -264,12 +264,16 @@ def log_output_json(proc: subprocess.Popen):
             continue
 
 
-def log_output_pretty(proc: subprocess.Popen):
+def make_table(console: Console, row: Optional[tuple] = None) -> str:
     """
-    Log output to console in a pretty way
+    Helper function to make the table object, add a row, and return the formatted text
 
     Args:
-        proc(Popen): bpftrace process
+        console(Console): Console to use to capture text
+        row(tuple): Optional row to add the table before printing
+
+    Return:
+        str: Table rendered into a string
     """
     table = Table(
         expand=True,
@@ -281,11 +285,24 @@ def log_output_pretty(proc: subprocess.Popen):
     table.add_column("comm", ratio=1)
     table.add_column("pid", ratio=1)
     table.add_column("args", ratio=10)
+    if row is not None:
+        table.add_row(*row)
 
-    console = Console()
     with console.capture() as capture:
         console.print(table)
-    logger.info("\n".join(capture.get().splitlines()[1:-1]))
+    return capture.get()
+
+
+def log_output_pretty(proc: subprocess.Popen):
+    """
+    Log output to console in a pretty way
+
+    Args:
+        proc(Popen): bpftrace process
+    """
+    console = Console()
+    table_str = make_table(console)
+    logger.info("\n".join(table_str.splitlines()[1:-1]))
 
     for line in iter(proc.stdout.readline, b""):
         try:
@@ -298,12 +315,10 @@ def log_output_pretty(proc: subprocess.Popen):
                 pid = data[2]
                 comm = data[3]
                 fields = "\t".join(data[3:])
-                table.add_row(syscall, comm, pid, fields)
 
                 # Only print newest row of actual data
-                with console.capture() as capture:
-                    console.print(table)
-                logger.info(capture.get().splitlines()[-2])
+                table_str = make_table(console, (syscall, comm, pid, fields))
+                logger.info(table_str.splitlines()[-2])
         except UnicodeDecodeError as exc:
             logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
             continue
