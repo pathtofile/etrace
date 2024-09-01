@@ -2,6 +2,18 @@
 Constants
 """
 
+TEMPLATE = """
+tracepoint:syscalls:sys_enter_{syscall} {{
+{filter_code}
+{code}
+}}
+
+tracepoint:syscalls:sys_exit_{syscall} {{
+{filter_code}
+  printf("r\\t{syscall}\\t%d\\t%d\\n", tid, args->ret);
+}}
+"""
+
 INT_TYPES = [
     "__kernel_old_time_t",
     "__s32",

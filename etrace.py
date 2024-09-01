@@ -18,8 +18,8 @@ from rich import box
 from rich.table import Table
 from rich.console import Console
 
-from custom_handlers import TEMPLATE, HANDLERS
-from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, SYSCALL_GROUPS
+from custom_handlers import HANDLERS
+from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, TEMPLATE, SYSCALL_GROUPS
 
 # pylint: disable-next=invalid-name
 logger = None
@@ -100,10 +100,11 @@ def generate_func(
     """
     # Add filtering to the function
     code = []
+    filter_code = []
     if comm is not None:
-        code.append(f'  if (comm != "{comm}") {{ return }}')
+        filter_code.append(f'  if (comm != "{comm}") {{ return }}')
     if pid is not None:
-        code.append(f"  if (pid != {pid}) {{ return }}")
+        filter_code.append(f"  if (pid != {pid}) {{ return }}")
     if ppid is not None:
         check = " && ".join(
             [
@@ -112,10 +113,10 @@ def generate_func(
                 f"curtask->parent->parent->pid != {ppid}",
             ]
         )
-        code.append(f"  if ({check}) {{ return }}")
+        filter_code.append(f"  if ({check}) {{ return }}")
 
     if syscall in HANDLERS:
-        return HANDLERS[syscall](code)
+        return HANDLERS[syscall](filter_code)
     sysdir = Path(f"/sys/kernel/debug/tracing/events/syscalls/sys_enter_{syscall}")
     if not sysdir.exists():
         logger.error("Syscall '%s' doesn't exist on this platform", syscall)
@@ -175,13 +176,15 @@ def generate_func(
     format_string = format_string.strip()
     format_args = ", ".join(arg_accesses)
     if len(arg_accesses) == 0:
-        code.append(f'  printf("{syscall}\\t%d\\t%d\\t%s\\n", tid, pid, comm);')
+        code.append(f'  printf("e\\t{syscall}\\t%d\\t%d\\t%s\\n", tid, pid, comm);')
     else:
         code.append(
-            f'  printf("{syscall}\\t%d\\t%d\\t%s\\t{format_string}\\n", tid, pid, comm,{format_args});'
+            f'  printf("e\\t{syscall}\\t%d\\t%d\\t%s\\t{format_string}\\n", tid, pid, comm,{format_args});'
         )
 
-    output = TEMPLATE.format(name=sysdir.name, code="\n".join(code)).strip()
+    output = TEMPLATE.format(
+        syscall=syscall, filter_code="\n".join(filter_code), code="\n".join(code)
+    ).strip()
     return header_lines, output
 
 
@@ -240,9 +243,12 @@ def log_output_json(proc: subprocess.Popen):
     Args:
         proc(Popen): bpftrace process
     """
+    events = {}
     for line in iter(proc.stdout.readline, b""):
         try:
             line = line.replace(b"\\\\x00", b" ").decode("utf-8", "ignore").strip()
+            if len(line) == 0:
+                continue
             j = json.loads(line)
             if j["type"] == "attached_probes":
                 probe_count = j["data"]["probes"]
@@ -250,15 +256,36 @@ def log_output_json(proc: subprocess.Popen):
             elif j["type"] == "printf":
                 # Build JSON with arguments as keys
                 data = j["data"].strip().split("\t")
-                dataj = {
-                    "syscall": data[0],
-                    "pid": data[2],
-                    "comm": data[3],
-                }
-                for d in data[3:]:
-                    ds = d.split(":")
-                    dataj[ds[0]] = ":".join(ds[1:])
-                logger.info(json.dumps(dataj))
+                tid = data[1]
+                if data[0] == "e":
+                    # enter, save line and wait for return
+                    events[tid] = data
+                elif data[0] == "r":
+                    # return
+                    enter_data = events[tid]
+                    dataj = {
+                        "syscall": enter_data[1],
+                        "pid": enter_data[3],
+                        "comm": enter_data[4],
+                    }
+                    for d in enter_data[5:]:
+                        ds = d.split(":")
+                        dataj[ds[0]] = ":".join(ds[1:])
+                    dataj["exit_code"] = data[3]
+                    logger.info(json.dumps(dataj))
+                    del events[tid]
+                elif data[0] == "s":
+                    # sinlge-shot tracepoints, no exit to capture
+                    dataj = {
+                        "syscall": data[1],
+                        "pid": data[3],
+                        "comm": data[4],
+                    }
+                    for d in data[5:]:
+                        ds = d.split(":")
+                        dataj[ds[0]] = ":".join(ds[1:])
+                    dataj["exit_code"] = data[3]
+                    logger.info(json.dumps(dataj))
         except (json.decoder.JSONDecodeError, UnicodeDecodeError) as exc:
             logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
             continue
@@ -285,6 +312,7 @@ def make_table(console: Console, row: Optional[tuple] = None) -> str:
     table.add_column("comm", ratio=1)
     table.add_column("pid", ratio=1)
     table.add_column("args", ratio=10)
+    table.add_column("exit code", ratio=1)
     if row is not None:
         table.add_row(*row)
 
@@ -303,21 +331,37 @@ def log_output_pretty(proc: subprocess.Popen):
     console = Console()
     table_str = make_table(console)
     logger.info("\n".join(table_str.splitlines()[1:-1]))
-
+    events = {}
     for line in iter(proc.stdout.readline, b""):
         try:
             line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
+            if len(line) == 0:
+                continue
             data = line.split("\t")
             if len(data) <= 3:
                 logger.debug("\t".join(data))
-            else:
-                syscall = data[0]
-                pid = data[2]
-                comm = data[3]
-                fields = "\t".join(data[3:])
-
-                # Only print newest row of actual data
-                table_str = make_table(console, (syscall, comm, pid, fields))
+                continue
+            tid = data[1]
+            if data[0] == "e":
+                # Enter, save data until return
+                events[tid] = data
+            elif data[0] == "r":
+                enter_data = events[tid]
+                syscall = enter_data[1]
+                pid = enter_data[3]
+                comm = enter_data[4]
+                fields = "\t".join(enter_data[5:])
+                exit_code = data[3]
+                table_str = make_table(console, (syscall, comm, pid, fields, exit_code))
+                logger.info(table_str.splitlines()[-2])
+                del events[tid]
+            elif data[0] == "s":
+                # Single-shot data, don't wait for return
+                syscall = data[1]
+                pid = data[3]
+                comm = data[4]
+                fields = "\t".join(data[5:])
+                table_str = make_table(console, (syscall, comm, pid, fields, "?"))
                 logger.info(table_str.splitlines()[-2])
         except UnicodeDecodeError as exc:
             logger.error("[*] Parsing Exception: %s - Line: %s", exc, line)
@@ -331,7 +375,7 @@ def log_output_plain(proc: subprocess.Popen):
     Args:
         proc(Popen): bpftrace process
     """
-    logger.info("syscall\ttid\tpid\tcomm\targs")
+    logger.info("enter/return\tsyscall\ttid\tpid\tcomm\targs")
     for line in iter(proc.stdout.readline, b""):
         try:
             line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
@@ -374,7 +418,7 @@ def run_bpftrace(header_file: Path, script_file: Path, output_format: str):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     if output_format == "json":
         log_output_json(proc)
-    if output_format == "pretty":
+    elif output_format == "pretty":
         log_output_pretty(proc)
     else:
         log_output_plain(proc)

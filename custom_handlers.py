@@ -7,12 +7,6 @@ from typing import List
 # Disable this so long lines aren't too confusing
 # pylint:disable=line-too-long
 
-TEMPLATE = """
-tracepoint:syscalls:{name} {{
-{code}
-}}
-"""
-
 
 def custom_empty(_filter_code: List[str]) -> tuple[List[str], str]:
     """
@@ -37,7 +31,7 @@ def custom_sched_process_exec(filter_code: List[str]) -> tuple[List[str], str]:
     output_lines.append("  $arg_start=curtask->mm->arg_start;")
     output_lines.append("  $arg_end=curtask->mm->arg_end;")
     output_lines.append(
-        '  printf("sched_process_exec\\t%d\\t%d\\t%s\\tfilename:%s\\targv:%r\\n", tid, pid, comm, str(args->filename), buf(uptr($arg_start), $arg_end-$arg_start));'
+        '  printf("s\\tsched_process_exec\\t%d\\t%d\\t%s\\tfilename:%s\\targv:%r\\n", tid, pid, comm, str(args->filename), buf(uptr($arg_start), $arg_end-$arg_start));'
     )
 
     output_lines.append("}")
