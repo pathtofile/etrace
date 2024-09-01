@@ -123,9 +123,9 @@ def generate_func(
     with open(sysdir / "format", "r", encoding="utf-8") as f:
         text = f.read()
     # Arguments come after '__syscall_nr' line
-    arg_names = ["comm", "pid"]
-    arg_fmts = ["%s", "%d"]
-    arg_accesses = ["comm", "pid"]
+    arg_names = []
+    arg_fmts = []
+    arg_accesses = []
     header_lines = []
 
     started = False
@@ -174,8 +174,12 @@ def generate_func(
         format_string += f"{arg_name}:{arg_fmts[i]}\\t"
     format_string = format_string.strip()
     format_args = ", ".join(arg_accesses)
-
-    code.append(f'  printf("{syscall}\\t{format_string}\\n", {format_args});')
+    if len(arg_accesses) == 0:
+        code.append(f'  printf("{syscall}\\t%d\\t%d\\t%s\\n", tid, pid, comm);')
+    else:
+        code.append(
+            f'  printf("{syscall}\\t%d\\t%d\\t%s\\t{format_string}\\n", tid, pid, comm,{format_args});'
+        )
 
     output = TEMPLATE.format(name=sysdir.name, code="\n".join(code)).strip()
     return header_lines, output
@@ -238,7 +242,7 @@ def log_output_json(proc: subprocess.Popen):
     """
     for line in iter(proc.stdout.readline, b""):
         try:
-            line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
+            line = line.replace(b"\\\\x00", b" ").decode("utf-8", "ignore").strip()
             j = json.loads(line)
             if j["type"] == "attached_probes":
                 probe_count = j["data"]["probes"]
@@ -248,8 +252,8 @@ def log_output_json(proc: subprocess.Popen):
                 data = j["data"].strip().split("\t")
                 dataj = {
                     "syscall": data[0],
-                    "comm": data[1].split(":")[-1],
-                    "pid": data[2].split(":")[-1],
+                    "pid": data[2],
+                    "comm": data[3],
                 }
                 for d in data[3:]:
                     ds = d.split(":")
@@ -291,8 +295,8 @@ def log_output_pretty(proc: subprocess.Popen):
                 logger.debug("\t".join(data))
             else:
                 syscall = data[0]
-                comm = data[1].split(":")[-1]
-                pid = data[2].split(":")[-1]
+                pid = data[2]
+                comm = data[3]
                 fields = "\t".join(data[3:])
                 table.add_row(syscall, comm, pid, fields)
 
@@ -312,9 +316,9 @@ def log_output_plain(proc: subprocess.Popen):
     Args:
         proc(Popen): bpftrace process
     """
+    logger.info("syscall\ttid\tpid\tcomm\targs")
     for line in iter(proc.stdout.readline, b""):
         try:
-            breakpoint()
             line = line.replace(b"\\x00", b" ").decode("utf-8", "ignore").strip()
             logger.info(line)
         except UnicodeDecodeError as exc:

@@ -27,7 +27,7 @@ def custom_sched_process_exec(filter_code: List[str]) -> tuple[List[str], str]:
     """
     Custom logic for the sched_process_exec syscall
     """
-    header_lines = ["#include <linux/mm_types.h>"]
+    header_lines = []
     output_lines = []
     output_lines = [
         "tracepoint:sched:sched_process_exec {",
@@ -37,7 +37,7 @@ def custom_sched_process_exec(filter_code: List[str]) -> tuple[List[str], str]:
     output_lines.append("  $arg_start=curtask->mm->arg_start;")
     output_lines.append("  $arg_end=curtask->mm->arg_end;")
     output_lines.append(
-        r'  printf("sched_process_exec\tcomm:%s\tpid:%d\tfilename:%s\targv:%r\n", comm, pid, str(args->filename), buf(uptr($arg_start), $arg_end-$arg_start));'
+        '  printf("sched_process_exec\\t%d\\t%d\\t%s\\tfilename:%s\\targv:%r\\n", tid, pid, comm, str(args->filename), buf(uptr($arg_start), $arg_end-$arg_start));'
     )
 
     output_lines.append("}")
