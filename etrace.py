@@ -19,7 +19,14 @@ from rich.table import Table
 from rich.console import Console
 
 from custom_handlers import HANDLERS
-from consts import INT_TYPES, STR_TYPES, CUSTOM_TYPES, TEMPLATE, SYSCALL_GROUPS
+from consts import (
+    INT_TYPES,
+    STR_TYPES,
+    CUSTOM_TYPES,
+    TEMPLATE,
+    TEMPLATE_EXIT,
+    SYSCALL_GROUPS,
+)
 
 # pylint: disable-next=invalid-name
 logger = None
@@ -81,40 +88,20 @@ def setup_logging(verbose: bool, output_file: Optional[str]):
 
 def generate_func(
     syscall: str,
-    comm: Optional[str],
-    pid: Optional[int],
-    ppid: Optional[int],
+    filter_code: List[str],
 ) -> tuple[List[str], str]:
     """
     Generate a single bpftrace function
 
     Args:
-        syscall: Name of syscall
-        comm: Only log proceses with this name
-        pid: Only log events from this pid
-        ppid: Only log events from this parent pid
+        syscall (str): Name of syscall
+        filter_code (List[str]): Code to filter events
 
         (list, str): Touple containing:
             - list of lines to add to custom header (to de-dupe with other syscalls)
             - Bpftrace script function to run
     """
-    # Add filtering to the function
     code = []
-    filter_code = []
-    if comm is not None:
-        filter_code.append(f'  if (comm != "{comm}") {{ return }}')
-    if pid is not None:
-        filter_code.append(f"  if (pid != {pid}) {{ return }}")
-    if ppid is not None:
-        check = " && ".join(
-            [
-                f"pid != {ppid}",
-                f"curtask->parent->pid != {ppid}",
-                f"curtask->parent->parent->pid != {ppid}",
-            ]
-        )
-        filter_code.append(f"  if ({check}) {{ return }}")
-
     if syscall in HANDLERS:
         return HANDLERS[syscall](filter_code)
     sysdir = Path(f"/sys/kernel/debug/tracing/events/syscalls/sys_enter_{syscall}")
@@ -219,8 +206,24 @@ def generate_script(
         "#pragma once",
     ]
     func_lines = []
+
+    # Add filtering to the function
+    filter_code = []
+    if comm is not None:
+        filter_code.append(f'  if (comm != "{comm}") {{ return }}')
+    if pid is not None:
+        filter_code.append(f"  if (pid != {pid}) {{ return }}")
+    if ppid is not None:
+        check = " && ".join(
+            [
+                f"pid != {ppid}",
+                f"curtask->parent->pid != {ppid}",
+                f"curtask->parent->parent->pid != {ppid}",
+            ]
+        )
+        filter_code.append(f"  if ({check}) {{ return }}")
     for syscall in syscalls:
-        func_header_lines, func_text = generate_func(syscall, comm, pid, ppid)
+        func_header_lines, func_text = generate_func(syscall, filter_code)
         if func_text != "":
             func_lines.append(func_text)
             for header_line in func_header_lines:
@@ -229,6 +232,7 @@ def generate_script(
 
     header = "\n".join(header_lines) + "\n"
     script = "\n\n".join(func_lines) + "\n"
+    script += TEMPLATE_EXIT.format(filter_code="\n".join(filter_code))
     logger.debug("=== c header: ===")
     logger.debug(header)
     logger.debug("=== bpftrace script: ===")
@@ -256,12 +260,14 @@ def log_output_json(proc: subprocess.Popen):
             elif j["type"] == "printf":
                 # Build JSON with arguments as keys
                 data = j["data"].strip().split("\t")
-                tid = data[1]
+                tid = data[2]
                 if data[0] == "e":
                     # enter, save line and wait for return
                     events[tid] = data
                 elif data[0] == "r":
                     # return
+                    if tid not in events:
+                        continue
                     enter_data = events[tid]
                     dataj = {
                         "syscall": enter_data[1],
@@ -341,11 +347,13 @@ def log_output_pretty(proc: subprocess.Popen):
             if len(data) <= 3:
                 logger.debug("\t".join(data))
                 continue
-            tid = data[1]
+            tid = data[2]
             if data[0] == "e":
                 # Enter, save data until return
                 events[tid] = data
             elif data[0] == "r":
+                if tid not in events:
+                    continue
                 enter_data = events[tid]
                 syscall = enter_data[1]
                 pid = enter_data[3]
