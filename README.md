@@ -42,7 +42,6 @@ openat	id	12216	dfd:-100	filename:/lib/x86_64-linux-gnu/libselinux.so.1	flags:52
 
 # TODO
  - Add custom parsers for networking
- - Output logging to file
 
 # Groups
 https://github.com/strace/strace/blob/master/src/sysent_shorthand_defs.h#L42
